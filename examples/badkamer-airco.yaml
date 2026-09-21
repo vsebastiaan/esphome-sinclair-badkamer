@@ -1,0 +1,77 @@
+# Badkamer: originele Gekkehenkie11 Sinclair-component.
+# Bewaar bestaande API-/wifi-/OTA-gegevens lokaal in secrets.yaml.
+esphome:
+  name: badkamer-airco
+  friendly_name: Badkamer Airco
+
+esp8266:
+  board: d1_mini
+
+logger:
+  baud_rate: 0
+  level: VERBOSE
+
+api:
+  encryption:
+    key: !secret badkamer_airco_api_key
+
+ota:
+  - platform: esphome
+    password: !secret badkamer_airco_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+  ap:
+    ssid: "badkamer-airco-Fallback"
+    password: !secret badkamer_airco_fallback_password
+
+captive_portal:
+
+i2c:
+  sda: D1
+  scl: D2
+  scan: true
+
+sensor:
+  - platform: sht3xd
+    id: badkamer_sht31
+    address: 0x44
+    temperature:
+      name: "Badkamer Temperatuur"
+      id: badkamer_temperatuur
+      accuracy_decimals: 1
+    humidity:
+      name: "Badkamer Luchtvochtigheid"
+      id: badkamer_luchtvochtigheid
+      accuracy_decimals: 1
+    update_interval: 5s
+
+uart:
+  id: ac_uart
+  tx_pin:
+    number: GPIO1
+    inverted: true
+  rx_pin:
+    number: GPIO3
+    inverted: true
+  baud_rate: 4800
+  data_bits: 8
+  parity: EVEN
+  stop_bits: 1
+  rx_buffer_size: 512
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/vsebastiaan/esphome-sinclair-badkamer
+      ref: 91f280231ff3fdc2eeb0f59857254aee8e24ad82
+    components: [sinclair_ac]
+    refresh: 0s
+
+climate:
+  - platform: sinclair_ac
+    id: tosot_badkamer
+    name: "Airco badkamer"
+    uart_id: ac_uart
