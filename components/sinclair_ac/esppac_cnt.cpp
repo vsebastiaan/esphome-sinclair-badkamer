@@ -46,53 +46,68 @@ void SinclairACCNT::setup()
     Temrec1[15] = 31.1111111111111;
 }
 
+void SinclairACCNT::reset_link_()
+{
+    this->state_ = ACState::Initializing;
+    this->update_ = ACUpdate::NoUpdate;
+    this->reqmodechange = false;
+    this->wait_response_ = false;
+    this->serialProcess_ = {};
+    Component::status_set_error();
+}
+
 void SinclairACCNT::loop()
 {
-    /* this reads data from UART */
     SinclairAC::loop();
-
-    /* we have a frame from AC */
-    if (this->serialProcess_.state == STATE_COMPLETE)
-    {
-        /* do not forget to order for restart of the recieve state machine */
+    const uint32_t now = millis();
+    if (this->serialProcess_.state == STATE_COMPLETE) {
         this->serialProcess_.state = STATE_RESTART;
-        /* mark that we have recieved a response */
-        this->wait_response_ = false;
-        /* log for ESPHome debug */
         log_packet(this->serialProcess_.data);
-
-        if (!verify_packet())  /* Verify length, header, counter and checksum */
-        {
-            return;
-        }
-
-        this->last_packet_received_ = millis();  /* Set the time at which we received our last packet */
-
-        /* A valid recieved packet of accepted type marks module as being ready */
-        if (this->state_ != ACState::Ready)
-        {
-            this->state_ = ACState::Ready;  
-            Component::status_clear_error();
-            this->last_packet_sent_ = millis();
-        }
-
-        if (this->update_ == ACUpdate::NoUpdate)
-        {
-            handle_packet(); /* this will update state of components in HA as well as internal settings */
+        if (verify_packet()) {
+            this->valid_reports_++;
+            this->wait_response_ = false;
+            this->last_packet_received_ = now;
+            const bool recovered = this->state_ != ACState::Ready;
+            if (recovered) {
+                this->state_ = ACState::Ready;
+                this->update_ = ACUpdate::NoUpdate;
+                Component::status_clear_error();
+                this->last_packet_sent_ = now;
+                ESP_LOGI(TAG, "AC communication established; fresh state received");
+            }
+            if (this->update_ == ACUpdate::NoUpdate) handle_packet();
+            if (recovered) this->publish_state();
+        } else {
+            this->invalid_frames_++;
         }
     }
 
-    /* we will send a packet to the AC as a reponse to indicate changes */
+    // Never let a missing response block communication indefinitely.
+    // Cancel pending commands; retries must only request status, not replay them.
+    if (this->wait_response_ && uint32_t(now - this->last_packet_sent_) >= 2000) {
+        this->retries_++;
+        ESP_LOGW(TAG, "AC response timeout; retrying without changing settings (retry=%lu)",
+                 (unsigned long) this->retries_);
+        this->reset_link_();
+    }
+    if (this->state_ == ACState::Ready &&
+        uint32_t(now - this->last_packet_received_) >= protocol::TIME_TIMEOUT_INACTIVE_MS) {
+        ESP_LOGW(TAG, "AC status stale; cancelling pending command and reconnecting");
+        // Preserve outstanding response timing until the two-second retry boundary.
+        const bool waiting = this->wait_response_;
+        this->reset_link_();
+        this->wait_response_ = waiting;
+    }
     send_packet();
-
-    /* if there are no packets for 5 seconds - mark module as not ready */
-    if (millis() - this->last_packet_received_ >= protocol::TIME_TIMEOUT_INACTIVE_MS)
-    {
-        if (this->state_ != ACState::Initializing)
-        {
-            this->state_ = ACState::Initializing;
-            Component::status_set_error();
-        }
+    if (uint32_t(now - this->last_summary_) >= 15000) {
+        this->last_summary_ = now;
+        ESP_LOGI(TAG, "LINK ready=%s waiting=%s tx=%lu rx_bytes=%lu valid=%lu invalid=%lu partial_resets=%lu retries=%lu last_valid_age_ms=%lu",
+                 this->state_ == ACState::Ready ? "yes" : "no",
+                 this->wait_response_ ? "yes" : "no",
+                 (unsigned long) this->tx_packets_, (unsigned long) this->rx_bytes_,
+                 (unsigned long) this->valid_reports_, (unsigned long) this->invalid_frames_,
+                 (unsigned long) this->partial_resets_, (unsigned long) this->retries_,
+                 (unsigned long) (now - this->last_packet_received_));
     }
 }
 
@@ -102,8 +117,10 @@ void SinclairACCNT::loop()
 
 void SinclairACCNT::control(const climate::ClimateCall &call)
 {
-    if (this->state_ != ACState::Ready)
+    if (this->state_ != ACState::Ready) {
+        ESP_LOGW(TAG, "Control rejected: no fresh AC communication");
         return;
+    }
 
     if (call.get_mode().has_value())
     {
@@ -184,6 +201,16 @@ void SinclairACCNT::send_packet()
         return;
     }
     
+    if (this->state_ != ACState::Ready) {
+        if (uint32_t(millis() - this->last_packet_sent_) < 2000) return;
+        // Same no-change marker as upstream. Avoid encoding unknown/NaN state.
+        packet[protocol::SET_CONST_02_BYTE] = protocol::SET_CONST_02_VAL;
+        packet[protocol::SET_CONST_BIT_BYTE] = protocol::SET_CONST_BIT_MASK;
+        packet[protocol::SET_NOCHANGE_BYTE] = protocol::SET_NOCHANGE_MASK;
+        this->write_packet_(packet);
+        return;
+    }
+
     packet[protocol::SET_CONST_02_BYTE] = protocol::SET_CONST_02_VAL; /* Some always 0x02 byte... */
     packet[protocol::SET_CONST_BIT_BYTE] = protocol::SET_CONST_BIT_MASK; /* Some always true bit */
 
@@ -279,7 +306,8 @@ void SinclairACCNT::send_packet()
     bool    fanTurbo  = false;
     if (this->has_custom_fan_mode())
     {
-        const char* custom_fan_mode = this->get_custom_fan_mode().c_str();
+        const std::string custom_fan_value = this->get_custom_fan_mode();
+        const char* custom_fan_mode = custom_fan_value.c_str();
 
         if (strcmp(custom_fan_mode, fan_modes::FAN_AUTO) == 0)
         {
@@ -544,31 +572,8 @@ void SinclairACCNT::send_packet()
     for (int i = 0; i < 20; i++)
          lastpacket[i] = packet[i];
     
-    packet.insert(packet.begin(), protocol::CMD_OUT_PARAMS_SET);
-    packet.insert(packet.begin(), protocol::SET_PACKET_LEN + 2); /* Add 2 bytes as we added a command and will add checksum */
+    this->write_packet_(packet);
 
-    /* Do checksum - sum of all bytes except sync and checksum itself% 0x100 
-       the module would be realized by the fact that we are using uint8_t*/
-    uint8_t checksum = 0;
-    for (uint8_t i = 0 ; i < packet.size() ; i++)
-    {
-        checksum += packet[i];
-    }
-    packet.push_back(checksum);
-
-    /* Do SYNC bytes */
-    packet.insert(packet.begin(), protocol::SYNC);
-    packet.insert(packet.begin(), protocol::SYNC);
-
-    //ESP_LOGV(TAG, "Stamp1: %lx", this->last_packet_sent_);
-    this->last_packet_sent_ = millis();  /* Save the time when we sent the last packet */
-    
-    this->wait_response_ = true;
-    write_array(packet);                 /* Sent the packet by UART */
-    log_packet(packet, true);            /* Log uart for debug purposes */
-   
-
-    
     /* update setting state-machine */
     switch(this->update_)
     {
@@ -584,6 +589,22 @@ void SinclairACCNT::send_packet()
             this->update_ = ACUpdate::NoUpdate;
             break;
     }
+}
+
+void SinclairACCNT::write_packet_(std::vector<uint8_t> packet)
+{
+    packet.insert(packet.begin(), protocol::CMD_OUT_PARAMS_SET);
+    packet.insert(packet.begin(), protocol::SET_PACKET_LEN + 2);
+    uint8_t checksum = 0;
+    for (uint8_t value : packet) checksum += value;
+    packet.push_back(checksum);
+    packet.insert(packet.begin(), protocol::SYNC);
+    packet.insert(packet.begin(), protocol::SYNC);
+    this->last_packet_sent_ = millis();
+    this->wait_response_ = true;
+    this->tx_packets_++;
+    write_array(packet);
+    log_packet(packet, true);
 }
 
 /*
@@ -616,6 +637,13 @@ bool SinclairACCNT::verify_packet()
     if (!commandAllowed)
     {
         ESP_LOGW(TAG, "Dropping invalid packet (command [%02X] not allowed)", this->serialProcess_.data[3]);
+        return false;
+    }
+
+    // Decoder reads through payload byte 42. Reject short valid-checksum frames.
+    if (this->serialProcess_.data.size() < 48 ||
+        this->serialProcess_.data.size() != size_t(this->serialProcess_.data[2]) + 3) {
+        ESP_LOGW(TAG, "Dropping invalid status length");
         return false;
     }
 
@@ -1124,3 +1152,4 @@ void SinclairACCNT::on_save_change(bool save)
 }  // namespace CNT
 }  // namespace sinclair_ac
 }  // namespace esphome
+
