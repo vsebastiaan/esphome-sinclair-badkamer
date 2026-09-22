@@ -172,19 +172,26 @@ class SinclairACCNT : public SinclairAC {
         ACState state_ = ACState::Initializing; /* Stores if the AC is responsive or not */
         ACUpdate update_ = ACUpdate::NoUpdate;  /* Stores if we need tu send update to AC or no */
 
-        climate::ClimateMode mode_internal_;
-        bool power_internal_;
+        climate::ClimateMode mode_internal_{climate::CLIMATE_MODE_OFF};
+        bool power_internal_{false};
 
         std::string display_mode_internal_;
-        bool display_power_internal_;
+        bool display_power_internal_{false};
 
         bool processUnitReport();
 
         void send_packet();
+        void write_packet_(std::vector<uint8_t> payload);
+        void reset_link_();
+        uint32_t tx_packets_{0};
+        uint32_t valid_reports_{0};
+        uint32_t invalid_frames_{0};
+        uint32_t retries_{0};
+        uint32_t last_summary_{0};
 
         bool reqmodechange = false;
-        unsigned char lastpacket[60];
-        unsigned char lastroomtemp;
+        unsigned char lastpacket[60]{};
+        unsigned char lastroomtemp{0};
 
         bool verify_packet();
         void handle_packet();
@@ -207,3 +214,4 @@ class SinclairACCNT : public SinclairAC {
 }  // namespace CNT
 }  // namespace sinclair_ac
 }  // namespace esphome
+

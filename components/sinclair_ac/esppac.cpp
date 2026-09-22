@@ -29,6 +29,9 @@ climate::ClimateTraits SinclairAC::traits()
 void SinclairAC::setup()
 {
   // Initialize times
+    this->serialProcess_ = {};
+    this->wait_response_ = false;
+    this->last_packet_received_ = millis();
     this->init_time_ = millis();
     this->last_packet_sent_ = millis();
     this->set_supported_custom_fan_modes({fan_modes::FAN_AUTO, fan_modes::FAN_LOW,
@@ -44,6 +47,16 @@ void SinclairAC::loop()
 
 void SinclairAC::read_data()
 {
+    // At 4800 baud a normal inter-byte gap is about 2.3 ms.
+    // Discard an abandoned partial frame, including an incomplete sync header.
+    if (!this->serialProcess_.data.empty() &&
+        this->serialProcess_.state != STATE_COMPLETE &&
+        this->serialProcess_.state != STATE_RESTART &&
+        uint32_t(millis() - this->last_rx_byte_) >= 250) {
+        this->serialProcess_ = {};
+        this->partial_resets_++;
+        ESP_LOGW(TAG, "RX partial frame timed out; searching for sync");
+    }
     while (available())  // Read while data is available
     {
         /* If we had a packet or a packet had not been decoded yet - do not recieve more data */
@@ -52,7 +65,9 @@ void SinclairAC::read_data()
             break;
         }
         uint8_t c;
-        this->read_byte(&c);  // Store in receive buffer
+        if (!this->read_byte(&c)) break;
+        this->last_rx_byte_ = millis();
+        this->rx_bytes_++;
 
         if (this->serialProcess_.state == STATE_RESTART)
         {
@@ -63,7 +78,8 @@ void SinclairAC::read_data()
         this->serialProcess_.data.push_back(c);
         if (this->serialProcess_.data.size() >= DATA_MAX)
         {
-            this->serialProcess_.data.clear();
+            this->serialProcess_ = {};
+            this->partial_resets_++;
             continue;
         }
         switch (this->serialProcess_.state)
@@ -84,6 +100,11 @@ void SinclairAC::read_data()
                     this->serialProcess_.data.push_back(0x7E);
                     this->serialProcess_.data.push_back(c);
 
+                    if (c < 2 || c > DATA_MAX - 3) {
+                        this->serialProcess_ = {};
+                        this->partial_resets_++;
+                        break;
+                    }
                     this->serialProcess_.frame_size = c;
                     this->serialProcess_.state = STATE_RECIEVE;
                 }
@@ -376,3 +397,4 @@ void SinclairAC::log_packet(std::vector<uint8_t> data, bool outgoing)
 
 }  // namespace sinclair_ac
 }  // namespace esphome
+

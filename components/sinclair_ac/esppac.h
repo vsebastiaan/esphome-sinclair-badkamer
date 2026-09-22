@@ -12,7 +12,7 @@ namespace esphome {
 
 namespace sinclair_ac {
 
-static const char *const VERSION = "0.0.1";
+static const char *const VERSION = "0.0.2-retry";
 
 static const uint8_t READ_TIMEOUT = 20;  // The maximum time to wait before considering a packet complete
 
@@ -128,13 +128,16 @@ class SinclairAC : public Component, public uart::UARTDevice, public climate::Cl
         std::string display_state_;
         std::string display_unit_state_;
 
-        bool plasma_state_;
-        bool beeper_state_;
-        bool sleep_state_;
-        bool xfan_state_;
-        bool save_state_;
+        bool plasma_state_{false};
+        bool beeper_state_{false};
+        bool sleep_state_{false};
+        bool xfan_state_{false};
+        bool save_state_{false};
 
-        SerialProcess_t serialProcess_;
+        SerialProcess_t serialProcess_{};
+        uint32_t last_rx_byte_{0};
+        uint32_t rx_bytes_{0};
+        uint32_t partial_resets_{0};
 
         float Temrec0 [16];
         float Temrec1 [16];
@@ -144,7 +147,7 @@ class SinclairAC : public Component, public uart::UARTDevice, public climate::Cl
         uint32_t last_packet_sent_;  // Stores the time at which the last packet was sent
         uint32_t last_03packet_sent_;  // Stores the time at which the last packet was sent
         uint32_t last_packet_received_;  // Stores the time at which the last packet was received
-        bool wait_response_;
+        bool wait_response_{false};
 
         climate::ClimateTraits traits() override;
 
@@ -184,3 +187,4 @@ class SinclairAC : public Component, public uart::UARTDevice, public climate::Cl
 
 }  // namespace sinclair_ac
 }  // namespace esphome
+
